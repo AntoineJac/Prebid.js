@@ -1,3 +1,7 @@
+import { config } from './config';
+import clone from 'just-clone';
+import find from 'core-js/library/fn/array/find';
+import includes from 'core-js/library/fn/array/includes';
 var CONSTANTS = require('./constants');
 
 var _loggingChecked = false;
@@ -10,8 +14,7 @@ var toString = Object.prototype.toString;
 let infoLogger = null;
 try {
   infoLogger = console.info.bind(window.console);
-}
-catch (e) {
+} catch (e) {
 }
 
 /*
@@ -85,8 +88,7 @@ exports.tryAppendQueryString = function (existingUrl, key, value) {
 exports.parseQueryStringParameters = function (queryObj) {
   var result = '';
   for (var k in queryObj) {
-    if (queryObj.hasOwnProperty(k))
-    { result += k + '=' + encodeURIComponent(queryObj[k]) + '&'; }
+    if (queryObj.hasOwnProperty(k)) { result += k + '=' + encodeURIComponent(queryObj[k]) + '&'; }
   }
 
   return result;
@@ -158,6 +160,8 @@ export function parseGPTSingleSizeArray(singleSize) {
 exports.getTopWindowLocation = function () {
   let location;
   try {
+    // force an exception in x-domain enviornments. #1509
+    window.top.location.toString();
     location = window.top.location;
   } catch (e) {
     location = window.location;
@@ -175,6 +179,14 @@ exports.getTopWindowUrl = function () {
   }
 
   return href;
+};
+
+exports.getTopWindowReferrer = function() {
+  try {
+    return window.top.document.referrer;
+  } catch (e) {
+    return document.referrer;
+  }
 };
 
 exports.logWarn = function (msg) {
@@ -205,28 +217,30 @@ function hasConsoleLogger() {
   return (window.console && window.console.log);
 }
 
+function hasConsoleError() {
+  return (window.console && window.console.error);
+}
+
 exports.hasConsoleLogger = hasConsoleLogger;
 
-var errLogFn = (function (hasLogger) {
-  if (!hasLogger) return '';
-  return window.console.error ? 'error' : 'log';
-}(hasConsoleLogger()));
-
 var debugTurnedOn = function () {
-  if ($$PREBID_GLOBAL$$.logging === false && _loggingChecked === false) {
-    $$PREBID_GLOBAL$$.logging = getParameterByName(CONSTANTS.DEBUG_MODE).toUpperCase() === 'TRUE';
+  if (config.getConfig('debug') === false && _loggingChecked === false) {
+    const debug = getParameterByName(CONSTANTS.DEBUG_MODE).toUpperCase() === 'TRUE';
+    config.setConfig({ debug });
     _loggingChecked = true;
   }
 
-  return !!$$PREBID_GLOBAL$$.logging;
+  return !!config.getConfig('debug');
 };
 
 exports.debugTurnedOn = debugTurnedOn;
 
-exports.logError = function (msg, code, exception) {
-  var errCode = code || 'ERROR';
-  if (debugTurnedOn() && hasConsoleLogger()) {
-    console[errLogFn](console, errCode + ': ' + msg, exception || '');
+/**
+ * Wrapper to console.error. Takes N arguments to log the same as console.error.
+ */
+exports.logError = function () {
+  if (debugTurnedOn() && hasConsoleError()) {
+    console.error.apply(console, arguments);
   }
 };
 
@@ -262,6 +276,8 @@ var getParameterByName = function (name) {
 
   return decodeURIComponent(results[1].replace(/\+/g, ' '));
 };
+
+exports.getParameterByName = getParameterByName;
 
 /**
  * This function validates paramaters.
@@ -335,7 +351,7 @@ exports.isNumber = function(object) {
  */
 exports.isEmpty = function (object) {
   if (!object) return true;
-  if (this.isArray(object) || this.isStr(object)) {
+  if (exports.isArray(object) || exports.isStr(object)) {
     return !(object.length > 0);
   }
 
@@ -436,8 +452,7 @@ exports.insertElement = function(elm, doc, target) {
   let elToAppend;
   if (target) {
     elToAppend = doc.getElementsByTagName(target);
-  }
-  else {
+  } else {
     elToAppend = doc.getElementsByTagName('head');
   }
   try {
@@ -449,20 +464,9 @@ exports.insertElement = function(elm, doc, target) {
   } catch (e) {}
 };
 
-exports.insertPixel = function (url) {
+exports.triggerPixel = function (url) {
   const img = new Image();
-  img.id = _getUniqueIdentifierStr();
   img.src = url;
-  img.height = 0;
-  img.width = 0;
-  img.style.display = 'none';
-  img.onload = function() {
-    try {
-      this.parentNode.removeChild(this);
-    } catch (e) {
-    }
-  };
-  exports.insertElement(img);
 };
 
 /**
@@ -470,8 +474,8 @@ exports.insertPixel = function (url) {
  * @param  {string} url URL to be requested
  * @param  {string} encodeUri boolean if URL should be encoded before inserted. Defaults to true
  */
-exports.insertCookieSyncIframe = function(url, encodeUri) {
-  let iframeHtml = this.createTrackPixelIframeHtml(url, encodeUri);
+exports.insertUserSyncIframe = function(url) {
+  let iframeHtml = this.createTrackPixelIframeHtml(url, false, 'allow-scripts allow-same-origin');
   let div = document.createElement('div');
   div.innerHTML = iframeHtml;
   let iframe = div.firstChild;
@@ -498,17 +502,29 @@ exports.createTrackPixelHtml = function (url) {
  * Creates a snippet of Iframe HTML that retrieves the specified `url`
  * @param  {string} url plain URL to be requested
  * @param  {string} encodeUri boolean if URL should be encoded before inserted. Defaults to true
+ * @param  {string} sandbox string if provided the sandbox attribute will be included with the given value
  * @return {string}     HTML snippet that contains the iframe src = set to `url`
  */
-exports.createTrackPixelIframeHtml = function (url, encodeUri = true) {
+exports.createTrackPixelIframeHtml = function (url, encodeUri = true, sandbox = '') {
   if (!url) {
     return '';
   }
   if (encodeUri) {
     url = encodeURI(url);
   }
+  if (sandbox) {
+    sandbox = `sandbox="${sandbox}"`;
+  }
 
-  return `<iframe frameborder="0" allowtransparency="true" marginheight="0" marginwidth="0" width="0" hspace="0" vspace="0" height="0" style="height:0p;width:0p;display:none;" scrolling="no" src="${url}"></iframe>`;
+  return `<iframe ${sandbox} id="${exports.getUniqueIdentifierStr()}"
+      frameborder="0"
+      allowtransparency="true"
+      marginheight="0" marginwidth="0"
+      width="0" hspace="0" vspace="0" height="0"
+      style="height:0p;width:0p;display:none;"
+      scrolling="no"
+      src="${url}">
+    </iframe>`;
 };
 
 /**
@@ -530,8 +546,7 @@ exports.getIframeDocument = function (iframe) {
     } else {
       doc = iframe.contentDocument;
     }
-  }
-  catch (e) {
+  } catch (e) {
     this.logError('Cannot get iframe document', e);
   }
 
@@ -559,8 +574,8 @@ export function flatten(a, b) {
   return a.concat(b);
 }
 
-export function getBidRequest(id) {
-  return $$PREBID_GLOBAL$$._bidsRequested.map(bidSet => bidSet.bids.find(bid => bid.bidId === id)).find(bid => bid);
+export function getBidRequest(id, bidsRequested) {
+  return find(bidsRequested.map(bidSet => find(bidSet.bids, bid => bid.bidId === id)), bid => bid);
 }
 
 export function getKeys(obj) {
@@ -618,7 +633,7 @@ export function shuffle(array) {
 }
 
 export function adUnitsFilter(filter, bid) {
-  return filter.includes(bid && bid.placementCode || bid && bid.adUnitCode);
+  return includes(filter, bid && bid.adUnitCode);
 }
 
 /**
@@ -631,8 +646,8 @@ export function isSrcdocSupported(doc) {
     'srcdoc' in doc.defaultView.frameElement && !/firefox/i.test(navigator.userAgent);
 }
 
-export function cloneJson(obj) {
-  return JSON.parse(JSON.stringify(obj));
+export function deepClone(obj) {
+  return clone(obj);
 }
 
 export function inIframe() {
@@ -652,13 +667,221 @@ export function replaceAuctionPrice(str, cpm) {
   return str.replace(/\$\{AUCTION_PRICE\}/g, cpm);
 }
 
-export function getBidderRequestAllAdUnits(bidder) {
-  return $$PREBID_GLOBAL$$._bidsRequested.find(request => request.bidderCode === bidder);
+export function timestamp() {
+  return new Date().getTime();
 }
 
-export function getBidderRequest(bidder, adUnitCode) {
-  return $$PREBID_GLOBAL$$._bidsRequested.find(request => {
+export function cookiesAreEnabled() {
+  if (window.navigator.cookieEnabled || !!document.cookie.length) {
+    return true;
+  }
+  window.document.cookie = 'prebid.cookieTest';
+  return window.document.cookie.indexOf('prebid.cookieTest') != -1;
+}
+
+/**
+ * Given a function, return a function which only executes the original after
+ * it's been called numRequiredCalls times.
+ *
+ * Note that the arguments from the previous calls will *not* be forwarded to the original function.
+ * Only the final call's arguments matter.
+ *
+ * @param {function} func The function which should be executed, once the returned function has been executed
+ *   numRequiredCalls times.
+ * @param {int} numRequiredCalls The number of times which the returned function needs to be called before
+ *   func is.
+ */
+export function delayExecution(func, numRequiredCalls) {
+  if (numRequiredCalls < 1) {
+    throw new Error(`numRequiredCalls must be a positive number. Got ${numRequiredCalls}`);
+  }
+  let numCalls = 0;
+  return function () {
+    numCalls++;
+    if (numCalls === numRequiredCalls) {
+      func.apply(null, arguments);
+    }
+  }
+}
+
+/**
+ * https://stackoverflow.com/a/34890276/428704
+ * @export
+ * @param {array} xs
+ * @param {string} key
+ * @returns {${key_value}: ${groupByArray}, key_value: {groupByArray}}
+ */
+export function groupBy(xs, key) {
+  return xs.reduce(function(rv, x) {
+    (rv[x[key]] = rv[x[key]] || []).push(x);
+    return rv;
+  }, {});
+}
+
+/**
+ * deepAccess utility function useful for doing safe access (will not throw exceptions) of deep object paths.
+ * @param {object} obj The object containing the values you would like to access.
+ * @param {string|number} path Object path to the value you would like to access.  Non-strings are coerced to strings.
+ * @returns {*} The value found at the specified object path, or undefined if path is not found.
+ */
+export function deepAccess(obj, path) {
+  path = String(path).split('.');
+  for (let i = 0; i < path.length; i++) {
+    obj = obj[path[i]];
+    if (typeof obj === 'undefined') {
+      return;
+    }
+  }
+  return obj;
+}
+
+/**
+ * Returns content for a friendly iframe to execute a URL in script tag
+ * @param {url} URL to be executed in a script tag in a friendly iframe
+ * <!--PRE_SCRIPT_TAG_MACRO--> and <!--POST_SCRIPT_TAG_MACRO--> are macros left to be replaced if required
+ */
+export function createContentToExecuteExtScriptInFriendlyFrame(url) {
+  if (!url) {
+    return '';
+  }
+
+  return `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><html><head><base target="_top" /><script>inDapIF=true;</script></head><body><!--PRE_SCRIPT_TAG_MACRO--><script src="${url}"></script><!--POST_SCRIPT_TAG_MACRO--></body></html>`;
+}
+
+/**
+ * Build an object consisting of only defined parameters to avoid creating an
+ * object with defined keys and undefined values.
+ * @param {object} object The object to pick defined params out of
+ * @param {string[]} params An array of strings representing properties to look for in the object
+ * @returns {object} An object containing all the specified values that are defined
+ */
+export function getDefinedParams(object, params) {
+  return params
+    .filter(param => object[param])
+    .reduce((bid, param) => Object.assign(bid, { [param]: object[param] }), {});
+}
+
+/**
+ * @typedef {Object} MediaTypes
+ * @property {Object} banner banner configuration
+ * @property {Object} native native configuration
+ * @property {Object} video video configuration
+ */
+
+/**
+ * Validates an adunit's `mediaTypes` parameter
+ * @param {MediaTypes} mediaTypes mediaTypes parameter to validate
+ * @return {boolean} If object is valid
+ */
+export function isValidMediaTypes(mediaTypes) {
+  const SUPPORTED_MEDIA_TYPES = ['banner', 'native', 'video'];
+  const SUPPORTED_STREAM_TYPES = ['instream', 'outstream'];
+
+  const types = Object.keys(mediaTypes);
+
+  if (!types.every(type => includes(SUPPORTED_MEDIA_TYPES, type))) {
+    return false;
+  }
+
+  if (mediaTypes.video && mediaTypes.video.context) {
+    return includes(SUPPORTED_STREAM_TYPES, mediaTypes.video.context);
+  }
+
+  return true;
+}
+
+export function getBidderRequest(bidRequests, bidder, adUnitCode) {
+  return find(bidRequests, request => {
     return request.bids
-      .filter(bid => bid.bidder === bidder && bid.placementCode === adUnitCode).length > 0;
-  }) || { start: null, requestId: null };
+      .filter(bid => bid.bidder === bidder && bid.adUnitCode === adUnitCode).length > 0;
+  }) || { start: null, auctionId: null };
+}
+
+/**
+ * Returns the origin
+ */
+export function getOrigin() {
+  // IE10 does not have this property. https://gist.github.com/hbogs/7908703
+  if (!window.location.origin) {
+    return window.location.protocol + '//' + window.location.hostname + (window.location.port ? ':' + window.location.port : '');
+  } else {
+    return window.location.origin;
+  }
+}
+
+/**
+ * Returns Do Not Track state
+ */
+export function getDNT() {
+  return navigator.doNotTrack === '1' || window.doNotTrack === '1' || navigator.msDoNotTrack === '1' || navigator.doNotTrack === 'yes';
+}
+
+const compareCodeAndSlot = (slot, adUnitCode) => slot.getAdUnitPath() === adUnitCode || slot.getSlotElementId() === adUnitCode;
+
+/**
+ * Returns filter function to match adUnitCode in slot
+ * @param {object} slot GoogleTag slot
+ * @return {function} filter function
+ */
+export function isAdUnitCodeMatchingSlot(slot) {
+  return (adUnitCode) => compareCodeAndSlot(slot, adUnitCode);
+}
+
+/**
+ * Returns filter function to match adUnitCode in slot
+ * @param {string} adUnitCode AdUnit code
+ * @return {function} filter function
+ */
+export function isSlotMatchingAdUnitCode(adUnitCode) {
+  return (slot) => compareCodeAndSlot(slot, adUnitCode);
+}
+
+/**
+ * Constructs warning message for when unsupported bidders are dropped from an adunit
+ * @param {Object} adUnit ad unit from which the bidder is being dropped
+ * @param {string} bidder bidder code that is not compatible with the adUnit
+ * @return {string} warning message to display when condition is met
+ */
+export function unsupportedBidderMessage(adUnit, bidder) {
+  const mediaType = Object.keys(adUnit.mediaTypes || {'banner': 'banner'}).join(', ');
+
+  return `
+    ${adUnit.code} is a ${mediaType} ad unit
+    containing bidders that don't support ${mediaType}: ${bidder}.
+    This bidder won't fetch demand.
+  `;
+}
+
+/**
+ * Delete property from object
+ * @param {Object} object
+ * @param {string} prop
+ * @return {Object} object
+ */
+export function deletePropertyFromObject(object, prop) {
+  let result = Object.assign({}, object)
+  delete result[prop];
+  return result
+}
+
+/**
+ * Delete requestId from external bid object.
+ * @param {Object} bid
+ * @return {Object} bid
+ */
+export function removeRequestId(bid) {
+  return exports.deletePropertyFromObject(bid, 'requestId');
+}
+
+/**
+ * Checks input is integer or not
+ * https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/isInteger
+ * @param {*} value
+ */
+export function isInteger(value) {
+  if (Number.isInteger) {
+    return Number.isInteger(value);
+  } else {
+    return typeof value === 'number' && isFinite(value) && Math.floor(value) === value;
+  }
 }
