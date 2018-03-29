@@ -111,7 +111,7 @@ export const spec = {
     return bidRequests.map(bidRequest => {
       bidRequest.startTime = new Date().getTime();
 
-      let page_url = config.getConfig('pageUrl');
+      let page_url = config.getConfig('publisherDomain');
       if (bidRequest.params.referrer) {
         page_url = bidRequest.params.referrer;
       } else if (!page_url) {
